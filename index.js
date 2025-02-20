@@ -34,7 +34,9 @@ const LOG_EVENT_TYPES = [
     'input_audio_buffer.committed',
     'input_audio_buffer.speech_stopped',
     'input_audio_buffer.speech_started',
-    'session.created'
+    'session.created',
+    'tool.call',
+    'tool.response'
 ];
 
 // Show AI response elapsed timing calculations
@@ -50,8 +52,6 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
-                              <Pause length="1"/>
                               <Say>O.K. you can start talking!</Say>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
@@ -73,7 +73,7 @@ fastify.register(async (fastify) => {
         let markQueue = [];
         let responseStartTimestampTwilio = null;
 
-        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
+        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
                 "OpenAI-Beta": "realtime=v1"
@@ -92,10 +92,25 @@ fastify.register(async (fastify) => {
                     instructions: SYSTEM_MESSAGE,
                     modalities: ["text", "audio"],
                     temperature: 0.8,
+                    tool_choice: "auto",
+                    tools: [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "description": "Get the current weather...",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": { "type": "string" }
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    ]
                 }
             };
 
-            console.log('Sending session update:', JSON.stringify(sessionUpdate));
+            console.log('Sending session update:', JSON.stringify(sessionUpdate, null, 2));
             openAiWs.send(JSON.stringify(sessionUpdate));
 
             // Uncomment the following line to have AI speak first:
@@ -177,7 +192,13 @@ fastify.register(async (fastify) => {
                 const response = JSON.parse(data);
 
                 if (LOG_EVENT_TYPES.includes(response.type)) {
-                    console.log(`Received event: ${response.type}`, response);
+                    console.log(`Received event: ${response.type}`, JSON.stringify(response, null, 2));
+                }
+
+                // Handle tool calls
+                const toolCall = response.response?.output[0] || null
+                if (toolCall?.type === 'function_call') {
+                    handleToolCall(toolCall, openAiWs);
                 }
 
                 if (response.type === 'response.audio.delta' && response.delta) {
@@ -272,3 +293,29 @@ fastify.listen({ port: PORT }, (err) => {
     }
     console.log(`Server is listening on port ${PORT}`);
 });
+
+function handleToolCall(toolCall, openAiWs) {
+    console.log('Handling tool call:', JSON.stringify(toolCall, null, 2))
+
+    const location = JSON.parse(toolCall.arguments).location
+    const fakeData = {
+        location: location,
+        temperature: Math.floor(Math.random() * 30) + 10,
+        condition: ['sunny', 'partly cloudy', 'rainy', 'cloudy'][Math.floor(Math.random() * 4)],
+        humidity: Math.floor(Math.random() * 50) + 30
+    }
+
+    const toolResponse = {
+        type: 'conversation.item.create',
+        item: {
+            type: 'function_call_output',
+            call_id: toolCall.call_id,
+            output: JSON.stringify(fakeData)
+        }
+    }
+
+    console.log('Sending tool response:', JSON.stringify(toolResponse, null, 2))
+
+    openAiWs.send(JSON.stringify(toolResponse))
+    openAiWs.send(JSON.stringify({ type: 'response.create' }))
+}
